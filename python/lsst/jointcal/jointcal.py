@@ -19,6 +19,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import dataclasses
 import collections
 import numpy as np
 import astropy.units as u
@@ -29,6 +30,7 @@ import lsst.pipe.base as pipeBase
 from lsst.afw.image import fluxErrFromABMagErr
 import lsst.afw.geom as afwGeom
 import lsst.pex.exceptions as pexExceptions
+import lsst.afw.cameraGeom
 import lsst.afw.table
 import lsst.meas.algorithms
 from lsst.pipe.tasks.colorterms import ColortermLibrary
@@ -378,6 +380,19 @@ class JointcalConfig(pipeBase.PipelineTaskConfig):
         sourceSelector.sourceFluxType = self.sourceFluxType
 
 
+@dataclasses.dataclass
+class JointcalInputData:
+    """The input data jointcal needs for each detector/visit."""
+    visit: int
+    catalog: lsst.afw.table.SourceCatalog
+    visitInfo: lsst.afw.image.VisitInfo
+    detector: lsst.afw.cameraGeom.Detector
+    photoCalib: lsst.afw.image.PhotoCalib
+    wcs: lsst.afw.image.skyWcs
+    bbox: lsst.geom.Box2I
+    filter: lsst.afw.image.Filter
+
+
 class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     """Jointly astrometrically and photometrically calibrate a group of images.
 
@@ -435,14 +450,14 @@ class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
                                ContainerClass=PerTractCcdDataIdContainer)
         return parser
 
-    def _build_ccdImage(self, dataRef, associations, jointcalControl):
+    def _build_ccdImage(self, data, associations, jointcalControl):
         """
         Extract the necessary things from this dataRef to add a new ccdImage.
 
         Parameters
         ----------
-        dataRef : `lsst.daf.persistence.ButlerDataRef`
-            DataRef to extract info from.
+        data : `JointcalInputData`
+            The loaded input data.
         associations : `lsst.jointcal.Associations`
             Object to add the info to, to construct a new CcdImage
         jointcalControl : `jointcal.JointcalControl`
@@ -460,42 +475,86 @@ class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
             ``filter``
                 This calexp's filter (`str`).
         """
-        if "visit" in dataRef.dataId.keys():
-            visit = dataRef.dataId["visit"]
-        else:
-            visit = dataRef.getButler().queryMetadata("calexp", ("visit"), dataRef.dataId)[0]
-
-        src = dataRef.get("src", flags=lsst.afw.table.SOURCE_IO_NO_FOOTPRINTS, immediate=True)
-
-        visitInfo = dataRef.get('calexp_visitInfo')
-        detector = dataRef.get('calexp_detector')
-        ccdId = detector.getId()
-        photoCalib = dataRef.get('calexp_photoCalib')
-        tanWcs = dataRef.get('calexp_wcs')
-        bbox = dataRef.get('calexp_bbox')
-        filt = dataRef.get('calexp_filter')
-        filterName = filt.getName()
-
-        goodSrc = self.sourceSelector.run(src)
+        goodSrc = self.sourceSelector.run(data.catalog)
 
         if len(goodSrc.sourceCat) == 0:
-            self.log.warn("No sources selected in visit %s ccd %s", visit, ccdId)
+            self.log.warn("No sources selected in visit %s ccd %s", data.visit, data.detector.getId())
         else:
-            self.log.info("%d sources selected in visit %d ccd %d", len(goodSrc.sourceCat), visit, ccdId)
+            self.log.info("%d sources selected in visit %d ccd %d", len(goodSrc.sourceCat),
+                          data.visit,
+                          data.detector.getId())
         associations.createCcdImage(goodSrc.sourceCat,
-                                    tanWcs,
-                                    visitInfo,
-                                    bbox,
-                                    filterName,
-                                    photoCalib,
-                                    detector,
-                                    visit,
-                                    ccdId,
+                                    data.wcs,
+                                    data.visitInfo,
+                                    data.bbox,
+                                    data.filter.getName(),
+                                    data.photoCalib,
+                                    data.detector,
+                                    data.visit,
+                                    data.detector.getId(),
                                     jointcalControl)
 
         Result = collections.namedtuple('Result_from_build_CcdImage', ('wcs', 'key', 'filter'))
         Key = collections.namedtuple('Key', ('visit', 'ccd'))
-        return Result(tanWcs, Key(visit, ccdId), filterName)
+        return Result(data.wcs, Key(data.visit, data.detector.getId()), data.filter.getName())
+
+    def _readDataId(self, butler, dataId):
+        """Read all of the data for one dataId from the butler."""
+        data = JointcalInputData
+        if "visit" in butler.dataId.keys():
+            data.visit = butler.dataId["visit"]
+        else:
+            data.visit = butler.getButler().queryMetadata("calexp", ("visit"), butler.dataId)[0]
+
+        data.catalog = butler.get(f'{self.config.inputCatalog.name}',
+                                  flags=lsst.afw.table.SOURCE_IO_NO_FOOTPRINTS,
+                                  dataId=dataId)
+        data.visitInfo = butler.get(f'{self.config.inputExposure.name}.visitInfo', dataId=dataId)
+        data.detector = butler.get(f'{self.config.inputExposure.name}.detector', dataId=dataId)
+        data.photoCalib = butler.get(f'{self.config.inputExposure.name}.photoCalib', dataId=dataId)
+        data.wcs = butler.get(f'{self.config.inputExposure.name}.wcs', dataId=dataId)
+        data.bbox = butler.get(f'{self.config.inputExposure.name}.bbox', dataId=dataId)
+        data.filter = butler.get(f'{self.config.inputExposure.name}.filter', dataId=dataId)
+        return data
+
+    def loadData(self, dataRefs, associations, jointcalControl, profile_jointcal=False):
+        """Read the data that jointcal needs to run. (Gen2 version)"""
+        visit_ccd_to_dataRef = {}
+        oldWcsList = []
+        filters = []
+        load_cat_prof_file = 'jointcal_loadData.prof' if profile_jointcal else ''
+        with pipeBase.cmdLineTask.profile(load_cat_prof_file):
+            # Need the bounding-box of the focal plane (the same for all visits) for photometry visit models
+            camera = dataRefs[0].get('camera', immediate=True)
+            self.focalPlaneBBox = camera.getFpBBox()
+            for dataRef in dataRefs:
+                data = self._readDataId(dataRef.getButler(), dataRef.dataId)
+                result = self._build_ccdImage(data, associations, jointcalControl)
+                oldWcsList.append(result.wcs)
+                visit_ccd_to_dataRef[result.key] = dataRef
+                filters.append(result.filter)
+        filters = collections.Counter(filters)
+
+        return oldWcsList, filters, visit_ccd_to_dataRef
+
+    def adaptArgsAndRun(self, inputData, inputDataIds, ouputDataIds, butler):
+        sourceFluxField = "slot_%sFlux" % (self.config.sourceFluxType,)
+        jointcalControl = lsst.jointcal.JointcalControl(sourceFluxField)
+        associations = lsst.jointcal.Associations()
+
+        visit_ccd_to_dataRef = {}
+        oldWcsList = []
+        filters = []
+        camera = inputData['inputCamera']
+        self.focalPlaneBBox = camera.getFpBBox()
+        for catalogDataId, exposureDataId in zip(inputDataIds['inputCatalogs'], inputDataIds['inputExposures']):
+            assert catalogDataId == exposureDataId, "The catalog and exposure dataIds must be identical."
+            data = self._readDataId(butler, catalogDataId)
+            result = self._build_ccdImage(data, associations, jointcalControl)
+            oldWcsList.append(result.wcs)
+            visit_ccd_to_dataRef[result.key] = ref
+            filters.append(result.filter)
+        filters = collections.Counter(filters)
 
     @pipeBase.timeMethod
     def runDataRef(self, dataRefs, profile_jointcal=False):
@@ -530,21 +589,10 @@ class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         jointcalControl = lsst.jointcal.JointcalControl(sourceFluxField)
         associations = lsst.jointcal.Associations()
 
-        visit_ccd_to_dataRef = {}
-        oldWcsList = []
-        filters = []
-        load_cat_prof_file = 'jointcal_build_ccdImage.prof' if profile_jointcal else ''
-        with pipeBase.cmdLineTask.profile(load_cat_prof_file):
-            # We need the bounding-box of the focal plane for photometry visit models.
-            # NOTE: we only need to read it once, because its the same for all exposures of a camera.
-            camera = dataRefs[0].get('camera', immediate=True)
-            self.focalPlaneBBox = camera.getFpBBox()
-            for ref in dataRefs:
-                result = self._build_ccdImage(ref, associations, jointcalControl)
-                oldWcsList.append(result.wcs)
-                visit_ccd_to_dataRef[result.key] = ref
-                filters.append(result.filter)
-        filters = collections.Counter(filters)
+        oldWcsList, filters, visit_ccd_to_dataRef = self.loadData(dataRefs,
+                                                                  associations,
+                                                                  jointcalControl,
+                                                                  profile_jointcal=profile_jointcal)
 
         associations.computeCommonTangentPoint()
 
