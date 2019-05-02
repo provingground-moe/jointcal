@@ -132,8 +132,57 @@ class JointcalRunner(pipeBase.ButlerInitializedTaskRunner):
             return pipeBase.Struct(exitStatus=exitStatus)
 
 
-class JointcalConfig(pexConfig.Config):
+class JointcalConfig(pipeBase.PipelineTaskConfig):
     """Config for JointcalTask"""
+
+    # Required Gen3 definitions
+    inputCatalogs = pipeBase.InputDatasetField(
+        doc="The definition of the input catalog dataset type.",
+        name="src",
+        storageClass="SourceCatalog",
+        dimensions=("instrument", "visit", "detector"),
+        manualLoad=True
+    )
+    inputCalexp = pipeBase.InputDatasetField(
+        doc=("The definition of the input exposure dataset type."
+             "The exposure itself is not needed: individual components are loaded separately."),
+        name="calexp",
+        storageClass="ExposureF",
+        dimensions=("instrument", "visit", "detector"),
+        manualLoad=True
+    )
+    inputCamera = pipeBase.InputDatasetField(
+        doc="The definition of the input camera dataset type.",
+        name="camera",
+        storageClass="TablePersistableCamera",
+        dimensions=("instrument",)
+    )
+    astrometryRefCat = pipeBase.InputDatasetField(
+        doc="The definition of the astrometry reference catalog dataset type.",
+        name="ref_cat",
+        storageClass="SimpleCatalog",
+        dimensions=("skypix",),
+        manualLoad=True
+    )
+    photometryRefCat = pipeBase.InputDatasetField(
+        doc="The definition of the photometry reference catalog dataset type.",
+        name="ref_cat",
+        storageClass="SimpleCatalog",
+        dimensions=("skypix",),
+        manualLoad=True
+    )
+    outputWcs = pipeBase.OutputDatasetField(
+        doc="The definition of the WCS output dataset type.",
+        name="jointcal_wcs",
+        storageClass="TablePersistableWcs",
+        dimensions=("instrument", "visit", "detector", "skymap", "tract")
+    )
+    outputPhotoCalib = pipeBase.OutputDatasetField(
+        doc="The definition of the PhotoCalib output dataset type.",
+        name="jointcal_photoCalib",
+        storageClass="TablePersistableWcs",
+        dimensions=("instrument", "visit", "detector", "skymap", "tract")
+    )
 
     doAstrometry = pexConfig.Field(
         doc="Fit astrometry and write the fitted result.",
@@ -320,6 +369,7 @@ class JointcalConfig(pexConfig.Config):
             raise pexConfig.FieldValidationError(JointcalConfig.colorterms, self, msg)
 
     def setDefaults(self):
+        self.quantum.dimensions = ("skymap", "tract")
         sourceSelector = self.sourceSelector["astrometry"]
         sourceSelector.setDefaults()
         # don't want to lose existing flags, just add to them.
