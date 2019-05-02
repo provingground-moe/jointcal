@@ -328,27 +328,25 @@ class JointcalConfig(pexConfig.Config):
         sourceSelector.sourceFluxType = self.sourceFluxType
 
 
-class JointcalTask(pipeBase.CmdLineTask):
-    """Jointly astrometrically and photometrically calibrate a group of images."""
+class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
+    """Jointly astrometrically and photometrically calibrate a group of images.
+
+        Parameters
+    ----------
+    butler : `lsst.daf.persistence.Butler`
+        The butler is passed to the refObjLoader constructor in case it is
+        needed. Ignored if the refObjLoader argument provides a loader directly.
+        Used to initialize the astrometry and photometry refObjLoaders.
+    profile_jointcal : `bool`
+        Set to True to profile different stages of this jointcal run.
+    """
 
     ConfigClass = JointcalConfig
     RunnerClass = JointcalRunner
     _DefaultName = "jointcal"
 
     def __init__(self, butler=None, profile_jointcal=False, **kwargs):
-        """
-        Instantiate a JointcalTask.
-
-        Parameters
-        ----------
-        butler : `lsst.daf.persistence.Butler`
-            The butler is passed to the refObjLoader constructor in case it is
-            needed. Ignored if the refObjLoader argument provides a loader directly.
-            Used to initialize the astrometry and photometry refObjLoaders.
-        profile_jointcal : `bool`
-            Set to True to profile different stages of this jointcal run.
-        """
-        pipeBase.CmdLineTask.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.profile_jointcal = profile_jointcal
         self.makeSubtask("sourceSelector")
         if self.config.doAstrometry:
