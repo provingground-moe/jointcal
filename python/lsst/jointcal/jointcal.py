@@ -389,23 +389,29 @@ class JointcalTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         Used to initialize the astrometry and photometry refObjLoaders.
     profile_jointcal : `bool`
         Set to True to profile different stages of this jointcal run.
+    initInputs : `dict`, optional
+        Dictionary used to initialize PipelineTasks (empty for jointcal).
     """
 
     ConfigClass = JointcalConfig
     RunnerClass = JointcalRunner
     _DefaultName = "jointcal"
 
-    def __init__(self, butler=None, profile_jointcal=False, **kwargs):
+    def __init__(self, butler=None, profile_jointcal=False, initInputs=None, **kwargs):
         super().__init__(**kwargs)
         self.profile_jointcal = profile_jointcal
         self.makeSubtask("sourceSelector")
         if self.config.doAstrometry:
-            self.makeSubtask('astrometryRefObjLoader', butler=butler)
+            if initInputs is not None:
+                # gen3 middleware does refcat things internally (and will not have a butler here)
+                self.makeSubtask('astrometryRefObjLoader', butler=butler)
             self.makeSubtask("astrometryReferenceSelector")
         else:
             self.astrometryRefObjLoader = None
         if self.config.doPhotometry:
-            self.makeSubtask('photometryRefObjLoader', butler=butler)
+            if initInputs is not None:
+                # gen3 middleware does refcat things internally (and will not have a butler here)
+                self.makeSubtask('photometryRefObjLoader', butler=butler)
             self.makeSubtask("photometryReferenceSelector")
         else:
             self.photometryRefObjLoader = None
